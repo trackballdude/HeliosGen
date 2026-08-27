@@ -117,16 +117,13 @@ export default function AuthModal() {
     }
 
     if (mode === "magic") {
-      // Magic link is login-only. shouldCreateUser:false means an email with no
-      // existing account won't be signed up here — signup stays on its own flow.
-      // emailRedirectTo points at the PKCE callback route, which exchanges the
-      // ?code=... it lands with for a session (see app/api/auth/callback).
+      // Magic link is login-only (shouldCreateUser:false — an email with no
+      // account won't be signed up). No emailRedirectTo: the redirect is
+      // resolved by Supabase's Site URL, mirroring the signup confirmation
+      // email, which likewise passes no redirect from the app.
       const { error: err } = await supabase.auth.signInWithOtp({
         email,
-        options: {
-          shouldCreateUser: false,
-          emailRedirectTo: `${window.location.origin}/api/auth/callback`,
-        },
+        options: { shouldCreateUser: false },
       });
       setBusy(false);
       if (err) { setError(err.message); return; }
