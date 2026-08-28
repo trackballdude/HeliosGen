@@ -5,7 +5,7 @@ import SettingsModal from "@/components/SettingsModal";
 import Toaster from "@/components/Toaster";
 import { useWorkflowStore } from "@/lib/store";
 
-export default function GlobalModals() {
+export default function GlobalModals({ callbackBaseUrl }: { callbackBaseUrl?: string }) {
   const settingsOpen    = useWorkflowStore((s) => s.settingsOpen);
   const setSettingsOpen = useWorkflowStore((s) => s.setSettingsOpen);
 
