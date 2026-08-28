@@ -42,10 +42,6 @@ export default async function RootLayout({
 }>) {
   const cookieStore = await cookies();
   const sidebarOpen = cookieStore.get("sidebar_state")?.value !== "false";
-  // Server-configured public base URL used to build the magic-link redirect
-  // (points at /api/auth/callback). Resolved at runtime, so it's correct per
-  // deploy without rebuilding — unlike a NEXT_PUBLIC_ build-time var.
-  const callbackBaseUrl = process.env.CALLBACK_BASE_URL ?? "";
 
   return (
     <html
@@ -66,7 +62,7 @@ export default async function RootLayout({
             </SidebarInset>
           </SidebarProvider>
         </TooltipProvider>
-        <GlobalModals callbackBaseUrl={callbackBaseUrl} />
+        <GlobalModals />
       </body>
     </html>
   );

@@ -5,13 +5,13 @@ import SettingsModal from "@/components/SettingsModal";
 import Toaster from "@/components/Toaster";
 import { useWorkflowStore } from "@/lib/store";
 
-export default function GlobalModals({ callbackBaseUrl }: { callbackBaseUrl?: string }) {
+export default function GlobalModals() {
   const settingsOpen    = useWorkflowStore((s) => s.settingsOpen);
   const setSettingsOpen = useWorkflowStore((s) => s.setSettingsOpen);
 
   return (
     <>
-      <AuthModal callbackBaseUrl={callbackBaseUrl} />
+      <AuthModal />
       <ResetPasswordModal />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       <Toaster />
