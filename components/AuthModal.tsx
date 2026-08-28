@@ -107,8 +107,11 @@ export default function AuthModal() {
     setError("");
 
     if (mode === "forgot") {
+      // Recovery links are PKCE (?code=...). Route through the server-side
+      // /api/auth/callback route to exchange the code, then land back at the
+      // root with ?type=recovery so AuthButton opens the set-new-password modal.
       const { error: err } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/`,
+        redirectTo: `${window.location.origin}/api/auth/callback?next=${encodeURIComponent("/?type=recovery")}`,
       });
       setBusy(false);
       if (err) { setError(err.message); return; }

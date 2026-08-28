@@ -17,26 +17,45 @@ export default function AuthButton() {
   const supabase                   = createClient();
 
   useEffect(() => {
-    // Magic-link / OAuth landings come back to the Site URL root with a PKCE
-    // ?code=... in the query (not the hash). Exchange it for a session here,
-    // since the /api/auth/callback route isn't on this path.
-    const query = new URLSearchParams(window.location.search);
-    const code  = query.get("code");
+    // Auth landings come back via query params, not the hash (PKCE flow):
+    //   ?type=recovery — the /api/auth/callback route established a recovery
+    //                    session and sent us back to set a new password.
+    //   ?auth_error=   — that route's code exchange failed.
+    //   ?code=...      — a PKCE code that reached the root instead of the
+    //                    callback route; exchange it here as a fallback.
+    const query      = new URLSearchParams(window.location.search);
+    const code       = query.get("code");
+    const queryType  = query.get("type");
+    const queryError = query.get("auth_error");
+
+    const cleanUrl = () => {
+      const url = new URL(window.location.href);
+      ["code", "type", "auth_error"].forEach((k) => url.searchParams.delete(k));
+      window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    };
+
     if (code) {
       supabase.auth.exchangeCodeForSession(code).then(async ({ error }) => {
-        const url = new URL(window.location.href);
-        url.searchParams.delete("code");
-        window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+        cleanUrl();
         if (error) {
           // The client's own detectSessionInUrl may have already consumed the
           // code, so a failure here can be benign — only warn if we truly have
           // no session.
           const { data } = await supabase.auth.getSession();
           if (!data.session) {
-            addToast("Sign-in link is invalid or expired — request a new one.", "info");
+            addToast("That link is invalid or expired — request a new one.", "info");
           }
+        } else if (queryType === "recovery") {
+          setResetPasswordModalOpen(true);
         }
       });
+    } else if (queryType === "recovery") {
+      // Recovery session was already established by the callback route.
+      cleanUrl();
+      setResetPasswordModalOpen(true);
+    } else if (queryError) {
+      cleanUrl();
+      addToast("That link is invalid or expired — please request a new one.", "info");
     }
 
     // Handle Supabase auth hash params on page load.
