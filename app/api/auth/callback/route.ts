@@ -28,7 +28,9 @@ export async function GET(request: NextRequest) {
     if (!error) {
       return NextResponse.redirect(`${origin}${next}`);
     }
+    // Surface the reason so failures are diagnosable instead of a bare flag.
+    return NextResponse.redirect(`${origin}/?auth_error=${encodeURIComponent(error.message)}`);
   }
 
-  return NextResponse.redirect(`${origin}/?auth_error=1`);
+  return NextResponse.redirect(`${origin}/?auth_error=missing_code`);
 }
