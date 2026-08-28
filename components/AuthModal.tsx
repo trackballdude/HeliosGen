@@ -55,7 +55,7 @@ function PasswordStrengthBar({ password }: { password: string }) {
 const ANIM_MS = 220;
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
-export default function AuthModal() {
+export default function AuthModal({ callbackBaseUrl }: { callbackBaseUrl?: string }) {
   const open = useWorkflowStore((s) => s.authModalOpen);
   const setOpen = useWorkflowStore((s) => s.setAuthModalOpen);
   const authModalView = useWorkflowStore((s) => s.authModalView);
@@ -118,12 +118,18 @@ export default function AuthModal() {
 
     if (mode === "magic") {
       // Magic link is login-only (shouldCreateUser:false — an email with no
-      // account won't be signed up). No emailRedirectTo: the redirect is
-      // resolved by Supabase's Site URL, mirroring the signup confirmation
-      // email, which likewise passes no redirect from the app.
+      // account won't be signed up). Point the redirect at the server-side
+      // /api/auth/callback route, which reliably exchanges the PKCE ?code=...
+      // for a session (client-side exchange on the root page is unreliable in
+      // SSR). Base URL is server-configured via CALLBACK_BASE_URL, falling
+      // back to the current origin.
+      const base = (callbackBaseUrl || window.location.origin).replace(/\/$/, "");
       const { error: err } = await supabase.auth.signInWithOtp({
         email,
-        options: { shouldCreateUser: false },
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: `${base}/api/auth/callback`,
+        },
       });
       setBusy(false);
       if (err) { setError(err.message); return; }
