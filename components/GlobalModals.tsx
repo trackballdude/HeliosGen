@@ -11,7 +11,7 @@ export default function GlobalModals({ callbackBaseUrl }: { callbackBaseUrl?: st
 
   return (
     <>
-      <AuthModal />
+      <AuthModal callbackBaseUrl={callbackBaseUrl} />
       <ResetPasswordModal />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       <Toaster />
