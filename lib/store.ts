@@ -14,6 +14,7 @@ if (typeof window !== "undefined" && process.env.NEXT_PUBLIC_GUEST_MODE !== "tru
 }
 import { edgeStyle } from "./edgeStyles";
 import { VIDEO_MODELS } from "./modelConfig";
+import { requestWorkflowSync } from "./workflowSyncBus";
 import {
   Node,
   Edge,
@@ -33,6 +34,7 @@ export interface NodeData extends Record<string, unknown> {
   status?: NodeStatus;
   // shared
   prompt?: string;
+  textMode?: "text" | "json" | "yaml"; // initial JSON/YAML toggle state for promptNode (seeded on creation)
   // generate node
   mode?: GenerateMode;
   model?: string;
@@ -375,7 +377,7 @@ export const useWorkflowStore = create<WorkflowStore>()(
 
         // ── Workflow actions (each syncs back to spaces) ────────────────────
 
-        onNodesChange: (changes) =>
+        onNodesChange: (changes) => {
           set((s) => {
             const nodes = applyNodeChanges(changes, s.nodes) as Node<NodeData>[];
             const removedIds = new Set(
@@ -407,18 +409,27 @@ export const useWorkflowStore = create<WorkflowStore>()(
               lastNodeSize,
               spaces: syncSpace(s.spaces, s.activeSpaceId, nodes, edges, s.nodeCounters),
             };
-          }),
+          });
+          // Persist discrete edits (node removed, or a manual resize finished)
+          // right away; drag/auto-measure churn still rides the debounce.
+          const discrete = changes.some(
+            (c) => c.type === "remove" || (c.type === "dimensions" && c.resizing === false),
+          );
+          if (discrete) requestWorkflowSync();
+        },
 
-        onEdgesChange: (changes) =>
+        onEdgesChange: (changes) => {
           set((s) => {
             const edges = applyEdgeChanges(changes, s.edges);
             return {
               edges,
               spaces: syncSpace(s.spaces, s.activeSpaceId, s.nodes, edges, s.nodeCounters),
             };
-          }),
+          });
+          if (changes.some((c) => c.type === "remove")) requestWorkflowSync();
+        },
 
-        onConnect: (connection) =>
+        onConnect: (connection) => {
           set((s) => {
             const undoStack = [...s.undoStack.slice(-(MAX_UNDO - 1)), { nodes: s.nodes, edges: s.edges }];
             let colorKey: string | undefined;
@@ -443,9 +454,11 @@ export const useWorkflowStore = create<WorkflowStore>()(
               redoStack: [],
               spaces: syncSpace(s.spaces, s.activeSpaceId, s.nodes, edges, s.nodeCounters),
             };
-          }),
+          });
+          requestWorkflowSync();
+        },
 
-        addNode: (node) =>
+        addNode: (node) => {
           set((s) => {
             const undoStack    = [...s.undoStack.slice(-(MAX_UNDO - 1)), { nodes: s.nodes, edges: s.edges }];
             const type         = node.type ?? "unknown";
@@ -466,9 +479,11 @@ export const useWorkflowStore = create<WorkflowStore>()(
               redoStack: [],
               spaces: syncSpace(s.spaces, s.activeSpaceId, nodes, s.edges, nodeCounters),
             };
-          }),
+          });
+          requestWorkflowSync();
+        },
 
-        insertEdge: (edge) =>
+        insertEdge: (edge) => {
           set((s) => {
             const undoStack = [...s.undoStack.slice(-(MAX_UNDO - 1)), { nodes: s.nodes, edges: s.edges }];
             const edges = [...s.edges, edge];
@@ -478,7 +493,9 @@ export const useWorkflowStore = create<WorkflowStore>()(
               redoStack: [],
               spaces: syncSpace(s.spaces, s.activeSpaceId, s.nodes, edges, s.nodeCounters),
             };
-          }),
+          });
+          requestWorkflowSync();
+        },
 
         removeEdgesForHandle: (nodeId, handleId) =>
           set((s) => {
@@ -698,7 +715,9 @@ export const useWorkflowStore = create<WorkflowStore>()(
         settingsOpen:              false,
         setSettingsOpen:           (v) => set({ settingsOpen: v }),
         authModalOpen:             false,
-        setAuthModalOpen:          (v) => set({ authModalOpen: v }),
+        // The desktop/guest build has no accounts — never surface the auth modal.
+        setAuthModalOpen:          (v) =>
+          set({ authModalOpen: process.env.NEXT_PUBLIC_GUEST_MODE === "true" ? false : v }),
         authModalView:             "signin",
         setAuthModalView:          (v) => set({ authModalView: v }),
         resetPasswordModalOpen:    false,
