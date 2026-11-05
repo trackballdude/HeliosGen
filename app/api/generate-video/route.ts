@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { jobStore } from "@/lib/jobStore";
+import { pollKieJob } from "@/lib/kieJobPoller";
+import { rewriteLocalMediaForKie } from "@/lib/kieUpload";
 import { ensureR2 } from "@/lib/r2";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { VIDEO_MODELS } from "@/lib/modelConfig";
@@ -54,7 +56,10 @@ export async function POST(req: NextRequest) {
 
   const callbackBase = process.env.CALLBACK_BASE_URL;
   const callBackUrl = rawCallBackUrl || (callbackBase ? `${callbackBase.replace(/\/$/, "")}/api/callback` : undefined);
-  if (!callBackUrl) return NextResponse.json({ error: "callBackUrl or CALLBACK_BASE_URL not set" }, { status: 500 });
+  // Guest/desktop mode polls kie.ai directly (lib/kieJobPoller) — no callback URL needed.
+  if (!callBackUrl && !GUEST_MODE) {
+    return NextResponse.json({ error: "callBackUrl or CALLBACK_BASE_URL not set" }, { status: 500 });
+  }
 
   const cfg = VIDEO_MODELS.find((m) => m.id === videoModel);
   if (!cfg) return NextResponse.json({ error: `Unknown video model: ${videoModel}` }, { status: 400 });
@@ -90,6 +95,50 @@ export async function POST(req: NextRequest) {
       character_orientation: mode,         // "image" or "video"
     };
     if (apiInput.extra) Object.assign(input, apiInput.extra);
+
+  } else if (apiInput.useMinimaxH3) {
+    // ── MiniMax H3 (text / image / reference to video) ───────────────────────
+    const [startFrameUrl, endFrameUrl, r2RefImages, r2RefVideos, r2RefAudios] = await Promise.all([
+      rawStartFrame ? ensureR2(rawStartFrame, "references").catch(() => rawStartFrame) : Promise.resolve(undefined),
+      rawEndFrame   ? ensureR2(rawEndFrame,   "references").catch(() => rawEndFrame)   : Promise.resolve(undefined),
+      Promise.all((rawRefImages    as string[]).map((u) => ensureR2(u, "references").catch(() => u))),
+      Promise.all((rawRefVideoUrls as string[]).map((u) => ensureR2(u, "references").catch(() => u))),
+      Promise.all((rawRefAudioUrls as string[]).map((u) => ensureR2(u, "references").catch(() => u))),
+    ]);
+
+    if (startFrameUrl || endFrameUrl) {
+      // image-to-video — frames take priority over references
+      effectiveApiId = cfg.imageApiId!;
+      input = {
+        prompt:                 prompt ?? "",
+        [apiInput.durationKey!]: clampedDuration,
+      };
+      if (startFrameUrl)          input[apiInput.firstFrameKey!] = startFrameUrl;
+      if (endFrameUrl)            input[apiInput.lastFrameKey!]  = endFrameUrl;
+      if (apiInput.resolutionKey) input[apiInput.resolutionKey]  = resolution;
+    } else if (r2RefImages.length > 0) {
+      // reference-to-video
+      effectiveApiId = "minimax-h3/reference-to-video";
+      input = {
+        prompt:                     prompt ?? "",
+        [apiInput.referenceImagesKey!]: r2RefImages.slice(0, 9),
+        [apiInput.aspectRatioKey!]: aspectRatio,
+        [apiInput.durationKey!]:    clampedDuration,
+      };
+      // reference_audio cannot be used alone — it always rides along with images here
+      if (r2RefVideos.length > 0 && apiInput.referenceVideosKey) input[apiInput.referenceVideosKey] = r2RefVideos.slice(0, 3);
+      if (r2RefAudios.length > 0 && apiInput.referenceAudiosKey) input[apiInput.referenceAudiosKey] = r2RefAudios.slice(0, 3);
+      if (apiInput.resolutionKey) input[apiInput.resolutionKey] = resolution;
+    } else {
+      // text-to-video
+      effectiveApiId = cfg.apiId;
+      input = {
+        prompt:                     prompt ?? "",
+        [apiInput.aspectRatioKey!]: aspectRatio,
+        [apiInput.durationKey!]:    clampedDuration,
+      };
+      if (apiInput.resolutionKey) input[apiInput.resolutionKey] = resolution;
+    }
 
   } else if (apiInput.firstFrameKey) {
     // ── Seedance-style models (separate frame keys + multi-ref arrays) ─────────
@@ -309,9 +358,10 @@ export async function POST(req: NextRequest) {
       [apiInput.durationKey!]:    apiInput.durationAsString ? String(clampedDuration) : clampedDuration,
     };
 
-    if (apiInput.modeKey)  input[apiInput.modeKey]  = mode;
-    if (apiInput.soundKey) input[apiInput.soundKey] = Boolean(sound);
-    if (apiInput.extra)    Object.assign(input, apiInput.extra);
+    if (apiInput.modeKey)       input[apiInput.modeKey]       = mode;
+    if (apiInput.soundKey)      input[apiInput.soundKey]      = Boolean(sound);
+    if (apiInput.resolutionKey) input[apiInput.resolutionKey] = resolution;
+    if (apiInput.extra)         Object.assign(input, apiInput.extra);
 
     if (apiInput.useImageUrls) {
       const image_urls: string[] = [];
@@ -335,6 +385,19 @@ export async function POST(req: NextRequest) {
         });
       }
       if (kling_elements.length > 0) input.kling_elements = kling_elements;
+    }
+  }
+
+  // Desktop/guest without a tunnel: kie.ai can't fetch our local reference
+  // media, so re-host any /generated or data: URLs in the payload first.
+  if (GUEST_MODE) {
+    try {
+      await rewriteLocalMediaForKie(input, apiKey);
+    } catch (e) {
+      return NextResponse.json(
+        { error: `Couldn't upload reference media to kie.ai: ${(e as Error).message}` },
+        { status: 502 },
+      );
     }
   }
 
@@ -401,6 +464,14 @@ export async function POST(req: NextRequest) {
         ...((input.image_urls as string[] | undefined) ?? []),
         ...((input.video_list as Array<{ url: string }> | undefined)?.map((v) => v.url) ?? []),
       ]
+    : apiInput.useMinimaxH3
+    ? [
+        ...(input.first_frame_url ? [input.first_frame_url as string] : []),
+        ...(input.last_frame_url  ? [input.last_frame_url as string]  : []),
+        ...((input.reference_image_urls as string[] | undefined) ?? []),
+        ...((input.reference_video_urls as string[] | undefined) ?? []),
+        ...((input.reference_audio_urls as string[] | undefined) ?? []),
+      ]
     : apiInput.referenceImagesKey
     ? (input[apiInput.referenceImagesKey] as string[] | undefined) ?? []
     : [
@@ -417,6 +488,11 @@ export async function POST(req: NextRequest) {
       sound: cfg.sound ? Boolean(sound) : false,
       reference_image_urls: referenceUrls,
     });
+    if (apiInput.useGoogleVeo) {
+      console.warn("[generate-video] Veo has no jobs-API polling yet — result needs a callback URL");
+    } else {
+      pollKieJob(taskId, apiKey, "video");
+    }
   } else {
     supabaseAdmin.from("generations").insert({
       task_id:              taskId,

@@ -4,8 +4,11 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { writeFile, unlink, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, normalize } from "node:path";
+import { MEDIA_DIR } from "@/lib/guest/paths";
 import { jobStore } from "@/lib/jobStore";
+import { pollKieJob } from "@/lib/kieJobPoller";
+import { ensureKieReachableImages } from "@/lib/kieUpload";
 import { ensureR2, uploadBuffer } from "@/lib/r2";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { IMAGE_MODELS, validateAzureCustomSize } from "@/lib/modelConfig";
@@ -74,8 +77,17 @@ function httpsPost(
 }
 
 
-// Fetch any http/https URL to a Buffer, following redirects
+// Fetch any http/https URL to a Buffer, following redirects.
+// Root-relative "/generated/..." refs (guest/desktop mode with no public
+// CALLBACK_BASE_URL) aren't valid URLs — read those straight off local disk.
 function fetchBuffer(url: string, maxRedirects = 5): Promise<Buffer> {
+  if (url.startsWith("/generated/")) {
+    const rel = normalize(decodeURIComponent(url.slice("/generated/".length).split(/[?#]/)[0]));
+    if (rel.startsWith("..") || rel.includes("\0")) {
+      return Promise.reject(new Error(`Refusing to read outside media dir: ${url}`));
+    }
+    return readFile(join(MEDIA_DIR, rel));
+  }
   return new Promise((resolve, reject) => {
     if (maxRedirects <= 0) return reject(new Error("Too many redirects"));
     const u   = new URL(url);
@@ -518,9 +530,15 @@ export async function POST(req: NextRequest) {
   if (!kieToken) return NextResponse.json({ error: "No Kie.ai API key configured. Add one in Settings." }, { status: 401 });
 
   const callbackBase = process.env.CALLBACK_BASE_URL;
-  if (!callbackBase) return NextResponse.json({ error: "CALLBACK_BASE_URL is not set" }, { status: 500 });
+  // Guest/desktop mode polls kie.ai directly (see lib/kieJobPoller) so it needs
+  // no public callback URL; hosted mode still requires one.
+  if (!callbackBase && !GUEST_MODE) {
+    return NextResponse.json({ error: "CALLBACK_BASE_URL is not set" }, { status: 500 });
+  }
 
-  const callBackUrl = `${callbackBase.replace(/\/$/, "")}/api/callback`;
+  const callBackUrl = callbackBase
+    ? `${callbackBase.replace(/\/$/, "")}/api/callback`
+    : undefined;
 
   try {
     const { apiInput } = cfg;
@@ -529,13 +547,20 @@ export async function POST(req: NextRequest) {
     const hasImages = r2ImageUrls.length > 0;
     const resolvedApiId = !hasImages && cfg.textOnlyApiId ? cfg.textOnlyApiId : cfg.apiId;
 
+    // Desktop/guest without a tunnel: kie.ai can't fetch our local reference
+    // images, so push them to kie's temporary file store first.
+    let kieImageUrls = r2ImageUrls;
+    if (GUEST_MODE && hasImages) {
+      kieImageUrls = await ensureKieReachableImages(r2ImageUrls, kieToken);
+    }
+
     const input: Record<string, unknown> = {
       prompt:                    prompt.slice(0, apiInput.promptMaxLength),
       [apiInput.aspectRatioKey]: aspectRatio,
     };
 
     if (apiInput.outputFormat)               input.output_format           = apiInput.outputFormat;
-    if (apiInput.imageInputKey && hasImages) input[apiInput.imageInputKey] = r2ImageUrls.slice(0, cfg.maxImages);
+    if (apiInput.imageInputKey && hasImages) input[apiInput.imageInputKey] = kieImageUrls.slice(0, cfg.maxImages);
     if (apiInput.qualityKey) {
       input[apiInput.qualityKey] = apiInput.qualityMap
         ? (apiInput.qualityMap[quality] ?? quality)
@@ -569,6 +594,7 @@ export async function POST(req: NextRequest) {
         status: "pending", prompt, model, aspect_ratio: aspectRatio, quality,
         reference_image_urls: r2ImageUrls,
       });
+      pollKieJob(taskId, kieToken, "image");
     } else {
       supabaseAdmin.from("generations").insert({
         task_id:              taskId,

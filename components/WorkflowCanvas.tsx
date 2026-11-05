@@ -18,6 +18,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { useWorkflowStore, NodeData } from "@/lib/store";
+import { requestWorkflowSync } from "@/lib/workflowSyncBus";
 import { VIDEO_MODELS } from "@/lib/modelConfig";
 import CuttableEdge from "@/components/edges/CuttableEdge";
 import { topoSort, resolveInputs } from "@/lib/executor";
@@ -45,6 +46,7 @@ import { MessageSquare, Sparkles, Clapperboard } from "lucide-react";
 const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
 async function getAccessToken(): Promise<string | undefined> {
+  if (process.env.NEXT_PUBLIC_GUEST_MODE === "true") return "guest";
   try {
     const { data } = await createClient().auth.getSession();
     return data.session?.access_token;
@@ -962,8 +964,11 @@ export default function WorkflowCanvas() {
       const source = nodes.find((n) => n.id === connection.source);
       const target = nodes.find((n) => n.id === connection.target);
 
-      // Ref nodes are pure sources — nothing can connect into them
-      if (target?.type === "imageInputNode" || target?.type === "videoInputNode") return false;
+      // Ref nodes are pure sources — nothing functional can connect into them.
+      // Exception: the decorative input handles accept any wire but do nothing with it.
+      if (target?.type === "imageInputNode" || target?.type === "videoInputNode") {
+        return connection.targetHandle === "decorativeText" || connection.targetHandle === "decorativeImage";
+      }
 
       // Prompt handles only accept text-producing nodes
       if (
@@ -1394,6 +1399,7 @@ export default function WorkflowCanvas() {
   const handleNodeDragStop = useCallback(() => {
     setSnapGuides([]);
     snapTargetRef.current = null;
+    requestWorkflowSync(); // new position is a discrete edit — persist now
   }, []);
 
   // When a member node inside a selected group is clicked or dragged,
